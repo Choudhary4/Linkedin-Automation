@@ -106,7 +106,7 @@ func (m *Manager) SendMessage(page *rod.Page, profileURL, profileName, message s
 	}
 
 	m.logger.Infof("Successfully sent message to %s", profileName)
-	
+
 	// Random wait between actions
 	m.stealthMgr.RandomWaitBetweenActions()
 
@@ -244,17 +244,15 @@ func (m *Manager) SendBulkMessages(page *rod.Page, recipients []struct {
 func (m *Manager) DetectNewConnections(page *rod.Page) ([]*storage.ConnectionRequest, error) {
 	m.logger.Info("Detecting new connections...")
 
-	// Navigate to My Network page
-	if err := page.Navigate("https://www.linkedin.com/mynetwork/"); err != nil {
-		return nil, fmt.Errorf("failed to navigate to My Network: %w", err)
-	}
-
-	m.stealthMgr.HumanDelay()
-
 	// Get pending connection requests from database
 	pending, err := m.db.GetPendingConnectionRequests()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pending requests: %w", err)
+	}
+
+	if len(pending) == 0 {
+		m.logger.Info("No pending connection requests to check")
+		return nil, nil
 	}
 
 	var newConnections []*storage.ConnectionRequest
@@ -269,19 +267,83 @@ func (m *Manager) DetectNewConnections(page *rod.Page) ([]*storage.ConnectionReq
 
 		time.Sleep(2 * time.Second)
 
-		// Check if Connect button is no longer present (meaning they're now connected)
-		_, err := page.Timeout(3 * time.Second).Element("button[aria-label*='Connect']")
-		if err != nil {
-			// Connect button not found, likely now connected
-			m.logger.Infof("Detected new connection: %s", request.ProfileName)
+		// Check connection status using JavaScript - more reliable
+		result, err := page.Eval(`() => {
+			// Method 1: Check for "1st" degree connection indicator
+			var degreeIndicator = document.body.innerText;
+			var is1stDegree = degreeIndicator.indexOf('1st') !== -1 && 
+			                  (degreeIndicator.indexOf('1st degree connection') !== -1 || 
+			                   degreeIndicator.indexOf('· 1st') !== -1);
 			
-			// Update status
-			m.db.UpdateConnectionRequestStatus(request.ProfileURL, "accepted")
-			newConnections = append(newConnections, request)
+			// Method 2: Check if Message button is in primary actions (only for connections)
+			var profileActions = document.querySelector('.pvs-profile-actions, .pv-top-card-v2-ctas');
+			var hasMessageButton = false;
+			var hasPendingButton = false;
+			var hasConnectButton = false;
+			
+			if (profileActions) {
+				var buttons = profileActions.querySelectorAll('button');
+				for (var i = 0; i < buttons.length; i++) {
+					var text = buttons[i].innerText.trim().toLowerCase();
+					var ariaLabel = (buttons[i].getAttribute('aria-label') || '').toLowerCase();
+					
+					if (text === 'message' || ariaLabel.indexOf('message') !== -1) {
+						hasMessageButton = true;
+					}
+					if (text === 'pending') {
+						hasPendingButton = true;
+					}
+					if (text === 'connect' || ariaLabel.indexOf('connect') !== -1) {
+						hasConnectButton = true;
+					}
+				}
+			}
+			
+			// Method 3: Check for "Pending" button (request sent but not accepted)
+			var allButtons = document.querySelectorAll('button');
+			for (var j = 0; j < allButtons.length; j++) {
+				if (allButtons[j].innerText.trim().toLowerCase() === 'pending') {
+					hasPendingButton = true;
+					break;
+				}
+			}
+			
+			return {
+				is1stDegree: is1stDegree,
+				hasMessageButton: hasMessageButton,
+				hasPendingButton: hasPendingButton,
+				hasConnectButton: hasConnectButton,
+				isConnected: (is1stDegree || hasMessageButton) && !hasPendingButton
+			};
+		}`)
+
+		if err != nil {
+			m.logger.Warnf("Failed to check connection status for %s: %v", request.ProfileName, err)
+			continue
+		}
+
+		if result.Value.Val() != nil {
+			data := result.Value.Val().(map[string]interface{})
+			isConnected, _ := data["isConnected"].(bool)
+			hasPending, _ := data["hasPendingButton"].(bool)
+
+			if hasPending {
+				m.logger.Debugf("%s: Request still pending", request.ProfileName)
+				continue
+			}
+
+			if isConnected {
+				m.logger.Infof("✅ Confirmed connection: %s", request.ProfileName)
+				// Update status in database
+				m.db.UpdateConnectionRequestStatus(request.ProfileURL, "accepted")
+				newConnections = append(newConnections, request)
+			} else {
+				m.logger.Debugf("%s: Not connected yet (may have been rejected or expired)", request.ProfileName)
+			}
 		}
 	}
 
-	m.logger.Infof("Found %d new connections", len(newConnections))
+	m.logger.Infof("Found %d confirmed new connections", len(newConnections))
 	return newConnections, nil
 }
 
@@ -292,7 +354,7 @@ func extractProfileID(profileURL string) string {
 	if len(parts) < 2 {
 		return ""
 	}
-	
+
 	username := strings.TrimSuffix(parts[1], "/")
 	return username
 }
