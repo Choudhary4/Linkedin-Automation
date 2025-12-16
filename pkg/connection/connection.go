@@ -240,120 +240,181 @@ func (m *Manager) handleConnectionModal(page *rod.Page, profile *search.SearchRe
 	return fmt.Errorf("send button not found")
 }
 
-// clickSendWithoutNote clicks the "Send without a note" button
+// clickSendWithoutNote clicks the "Send without a note" button or handles direct send
 func (m *Manager) clickSendWithoutNote(page *rod.Page) error {
-	// Wait for modal to appear
-	time.Sleep(2 * time.Second)
+	m.logger.Debug("Waiting for connection modal to appear...")
+
+	// Wait for modal to appear - try multiple times
+	var modalFound bool
+	for attempt := 0; attempt < 5; attempt++ {
+		time.Sleep(1 * time.Second)
+
+		// Check if modal is present
+		checkResult, _ := page.Eval(`() => {
+			var modal = document.querySelector('.artdeco-modal, [role="dialog"], [data-test-modal]');
+			var hasInvitationText = document.body.innerText.indexOf('Add a note to your invitation') !== -1;
+			var hasSendButton = document.body.innerText.indexOf('Send without a note') !== -1;
+			return {
+				modalFound: !!modal,
+				hasInvitationText: hasInvitationText,
+				hasSendButton: hasSendButton
+			};
+		}`)
+
+		if checkResult != nil && checkResult.Value.Val() != nil {
+			data := checkResult.Value.Val().(map[string]interface{})
+			if hasSend, ok := data["hasSendButton"].(bool); ok && hasSend {
+				m.logger.Debug("Modal with Send button detected!")
+				modalFound = true
+				break
+			}
+			if hasModal, ok := data["modalFound"].(bool); ok && hasModal {
+				m.logger.Debug("Modal detected, checking for buttons...")
+				modalFound = true
+				break
+			}
+		}
+		m.logger.Debugf("Waiting for modal... attempt %d/5", attempt+1)
+	}
 
 	// Take screenshot for debugging
 	page.MustScreenshot("screenshots/connection_modal.png")
 	m.logger.Debug("Screenshot saved: screenshots/connection_modal.png")
 
-	// Use JavaScript to find and click the send button - most reliable approach
+	if !modalFound {
+		m.logger.Debug("No modal found after waiting")
+	}
+
+	// METHOD 1: Use Rod to find "Send without a note" button
+	m.logger.Debug("Looking for Send without a note button using Rod...")
+	sendBtn, err := page.Timeout(3*time.Second).ElementR("button", "Send without a note")
+	if err == nil && sendBtn != nil {
+		visible, _ := sendBtn.Visible()
+		if visible {
+			m.logger.Debug("Found Send without a note button via Rod, clicking...")
+			err = sendBtn.Click(proto.InputMouseButtonLeft, 1)
+			if err == nil {
+				m.logger.Info("✅ Clicked Send without a note button via Rod")
+				return nil
+			}
+		}
+	}
+
+	// METHOD 2: Find buttons and look for exact text match
+	m.logger.Debug("Trying button element search...")
+	buttons, err := page.Elements("button")
+	if err == nil {
+		for _, btn := range buttons {
+			text, _ := btn.Text()
+			text = strings.TrimSpace(text)
+			if text == "Send without a note" {
+				visible, _ := btn.Visible()
+				if visible {
+					m.logger.Debug("Found button with exact text, clicking...")
+					err = btn.Click(proto.InputMouseButtonLeft, 1)
+					if err == nil {
+						m.logger.Info("✅ Clicked Send without a note via element search")
+						return nil
+					}
+				}
+			}
+		}
+	}
+
+	// METHOD 3: Try JavaScript click
+	m.logger.Debug("Trying JavaScript for Send without a note...")
 	result, err := page.Eval(`() => {
-		// Wait a bit for modal to fully render
+		var allButtons = document.querySelectorAll('button');
+		var buttonTexts = [];
+		for (var i = 0; i < allButtons.length; i++) {
+			var txt = allButtons[i].innerText.trim();
+			if (txt.length > 0 && txt.length < 50) {
+				buttonTexts.push(txt);
+			}
+		}
 		
-		// Method 1: Look for "Send without a note" or "Send" button
-		var buttons = document.querySelectorAll('button');
-		for (var i = 0; i < buttons.length; i++) {
-			var btn = buttons[i];
-			var text = btn.innerText.trim().toLowerCase();
-			var ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-			
-			// Check for send-related buttons
-			if (text.indexOf('send without') !== -1 || text === 'send' || text === 'send now' ||
-			    ariaLabel.indexOf('send without') !== -1 || ariaLabel.indexOf('send now') !== -1 || 
-			    ariaLabel.indexOf('send invitation') !== -1) {
-				// Make sure button is visible
+		// Look for "Send without a note" button
+		for (var i = 0; i < allButtons.length; i++) {
+			var btn = allButtons[i];
+			var text = btn.innerText.trim();
+			if (text === 'Send without a note') {
 				var rect = btn.getBoundingClientRect();
 				if (rect.width > 0 && rect.height > 0) {
 					btn.click();
-					return {success: true, method: 'direct_button', text: text};
+					return {success: true, method: 'exact_match', text: text};
 				}
 			}
 		}
 		
-		// Method 2: Look in modal/dialog specifically
-		var modals = document.querySelectorAll('.artdeco-modal, [role="dialog"], .send-invite, [data-test-modal]');
+		// Try partial match
+		for (var i = 0; i < allButtons.length; i++) {
+			var btn = allButtons[i];
+			var text = btn.innerText.trim().toLowerCase();
+			if (text.indexOf('send without') !== -1 || text.indexOf('without a note') !== -1) {
+				var rect = btn.getBoundingClientRect();
+				if (rect.width > 0 && rect.height > 0) {
+					btn.click();
+					return {success: true, method: 'partial_match', text: text};
+				}
+			}
+		}
+		
+		// Look for primary button with "send" in modal
+		var modals = document.querySelectorAll('.artdeco-modal, [role="dialog"]');
 		for (var j = 0; j < modals.length; j++) {
 			var modal = modals[j];
 			var modalBtns = modal.querySelectorAll('button');
 			for (var k = 0; k < modalBtns.length; k++) {
 				var mbtn = modalBtns[k];
 				var mtext = mbtn.innerText.trim().toLowerCase();
-				
-				if (mtext.indexOf('send') !== -1) {
+				if (mtext.indexOf('send') !== -1 && mtext.indexOf('add') === -1) {
 					mbtn.click();
-					return {success: true, method: 'modal_button', text: mtext};
-				}
-			}
-			
-			// Try primary button in modal
-			var primaryBtn = modal.querySelector('button.artdeco-button--primary, button[class*="primary"]');
-			if (primaryBtn) {
-				var ptext = primaryBtn.innerText.trim().toLowerCase();
-				if (ptext.indexOf('send') !== -1 || ptext.indexOf('connect') !== -1) {
-					primaryBtn.click();
-					return {success: true, method: 'primary_button', text: ptext};
+					return {success: true, method: 'modal_send', text: mtext};
 				}
 			}
 		}
 		
-		// Method 3: Find any visible primary/action button with Send text
-		var allButtons = document.querySelectorAll('button.artdeco-button--primary, button.artdeco-button--2, button[class*="primary"]');
-		for (var m = 0; m < allButtons.length; m++) {
-			var abtn = allButtons[m];
-			var atext = abtn.innerText.trim().toLowerCase();
-			var rect = abtn.getBoundingClientRect();
-			
-			if (rect.width > 0 && rect.height > 0 && (atext.indexOf('send') !== -1)) {
-				abtn.click();
-				return {success: true, method: 'primary_class', text: atext};
-			}
-		}
-		
-		// Return debug info
-		return {
-			success: false, 
-			availableButtons: Array.from(buttons).slice(0, 20).map(function(b) { 
-				return {text: b.innerText.trim().substring(0, 40), classes: b.className.substring(0, 50)}; 
-			}),
-			modalsFound: modals.length
-		};
+		return {success: false, allButtons: buttonTexts, modalCount: modals.length};
 	}`)
 
 	if err == nil && result.Value.Val() != nil {
 		data := result.Value.Val().(map[string]interface{})
 		if success, ok := data["success"].(bool); ok && success {
-			m.logger.Infof("Clicked Send button via JavaScript (method: %v, text: %v)", data["method"], data["text"])
+			m.logger.Infof("✅ Clicked Send button via JavaScript (method: %v)", data["method"])
 			return nil
 		}
-		// Log available buttons for debugging
-		if buttons, ok := data["availableButtons"].([]interface{}); ok {
-			m.logger.Debugf("Available buttons in modal: %v", buttons)
-		}
-		if modals, ok := data["modalsFound"].(float64); ok {
-			m.logger.Debugf("Modals found: %v", modals)
+		if buttons, ok := data["allButtons"].([]interface{}); ok && len(buttons) > 0 {
+			m.logger.Warnf("Available buttons on page: %v", buttons)
 		}
 	}
 
-	// If JS failed, try Rod selectors as fallback
-	sendSelectors := []string{
-		"button[aria-label='Send without a note']",
-		"button[aria-label='Send now']",
-		"button[aria-label='Send invitation']",
-	}
-
-	for _, selector := range sendSelectors {
-		btn, err := page.Timeout(2 * time.Second).Element(selector)
-		if err == nil && btn != nil {
-			visible, _ := btn.Visible()
-			if visible {
-				if err := btn.Click(proto.InputMouseButtonLeft, 1); err == nil {
-					m.logger.Debug("Clicked Send button via Rod selector")
-					return nil
-				}
+	// METHOD 4: Check if connection was already sent (Pending button)
+	alreadySentCheck, _ := page.Eval(`() => {
+		var actionButtons = document.querySelectorAll('.pvs-profile-actions button, .pv-top-card-v2-ctas button, button');
+		for (var i = 0; i < actionButtons.length; i++) {
+			var text = actionButtons[i].innerText.trim().toLowerCase();
+			if (text === 'pending') {
+				return {alreadySent: true, reason: 'pending_button'};
 			}
+		}
+		
+		var toasts = document.querySelectorAll('.artdeco-toast-item, [role="alert"]');
+		for (var j = 0; j < toasts.length; j++) {
+			var toastText = toasts[j].innerText.toLowerCase();
+			if (toastText.indexOf('invitation sent') !== -1 || toastText.indexOf('request sent') !== -1) {
+				return {alreadySent: true, reason: 'toast_message'};
+			}
+		}
+		
+		return {alreadySent: false};
+	}`)
+
+	if alreadySentCheck != nil && alreadySentCheck.Value.Val() != nil {
+		data := alreadySentCheck.Value.Val().(map[string]interface{})
+		if sent, ok := data["alreadySent"].(bool); ok && sent {
+			reason := data["reason"]
+			m.logger.Infof("Connection request was sent (detected via: %v)", reason)
+			return nil
 		}
 	}
 
@@ -362,9 +423,9 @@ func (m *Manager) clickSendWithoutNote(page *rod.Page) error {
 
 // findConnectButton finds the Connect button on a profile
 // LinkedIn has multiple layouts:
-// 1. Direct "Connect" button visible on profile
+// 1. Direct "Connect" button visible on profile (main action area)
 // 2. "Connect" hidden under "More" dropdown menu
-// 3. "Add" option in the More dropdown (same as Connect)
+// 3. "Follow" is primary, need to use More -> Connect
 func (m *Manager) findConnectButton(page *rod.Page) (*rod.Element, error) {
 	// Wait for page to load
 	time.Sleep(2 * time.Second)
@@ -373,91 +434,45 @@ func (m *Manager) findConnectButton(page *rod.Page) (*rod.Element, error) {
 	page.MustScreenshot("screenshots/profile_page.png")
 	m.logger.Debug("Screenshot saved: screenshots/profile_page.png")
 
-	// First try using JavaScript to find and click the Connect button - most reliable
-	m.logger.Debug("Trying JavaScript to find Connect button...")
-	result, err := page.Eval(`() => {
-		// Method 1: Find button with "Connect" text and connect icon
-		var buttons = document.querySelectorAll('button');
-		for (var i = 0; i < buttons.length; i++) {
-			var btn = buttons[i];
-			var text = btn.innerText.trim().toLowerCase();
-			var ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-			
-			// Check for Connect button
-			if (text === 'connect' || text.indexOf('connect') === 0 || 
-			    ariaLabel.indexOf('connect') !== -1 || ariaLabel.indexOf('invite') !== -1) {
-				// Make sure button is visible
-				var rect = btn.getBoundingClientRect();
-				if (rect.width > 0 && rect.height > 0) {
-					console.log('Found Connect button:', text, ariaLabel);
-					btn.click();
-					return {success: true, method: 'direct_button', text: text};
-				}
-			}
-		}
-		
-		// Method 2: Find the profile actions section and look for Connect
-		var actionSections = document.querySelectorAll('.pvs-profile-actions, .pv-top-card-v2-ctas, [class*="profile-actions"]');
-		for (var j = 0; j < actionSections.length; j++) {
-			var section = actionSections[j];
-			var btns = section.querySelectorAll('button');
-			for (var k = 0; k < btns.length; k++) {
-				var b = btns[k];
-				var txt = b.innerText.trim().toLowerCase();
-				if (txt === 'connect' || txt.indexOf('connect') === 0) {
-					b.click();
-					return {success: true, method: 'action_section', text: txt};
-				}
-			}
-		}
-		
-		// Method 3: Look for the specific LinkedIn Connect button structure
-		// LinkedIn uses a button with a span containing "Connect" and an icon
-		var allSpans = document.querySelectorAll('button span');
-		for (var m = 0; m < allSpans.length; m++) {
-			var span = allSpans[m];
-			if (span.innerText.trim().toLowerCase() === 'connect') {
-				var parentBtn = span.closest('button');
-				if (parentBtn) {
-					parentBtn.click();
-					return {success: true, method: 'span_parent', text: 'connect'};
-				}
-			}
-		}
-		
-		return {success: false, availableButtons: Array.from(document.querySelectorAll('button')).slice(0, 15).map(function(b) { 
-			return {text: b.innerText.trim().substring(0, 30), aria: b.getAttribute('aria-label')}; 
-		})};
-	}`)
+	// FIRST: Try the More dropdown approach - this is where Connect usually is
+	m.logger.Debug("Checking More dropdown for Connect option...")
 
-	if err == nil && result.Value.Val() != nil {
-		data := result.Value.Val().(map[string]interface{})
-		if success, ok := data["success"].(bool); ok && success {
-			m.logger.Infof("Clicked Connect button via JavaScript (method: %v)", data["method"])
-			return nil, nil // Return nil to indicate button was already clicked
-		}
-		// Log available buttons for debugging
-		if buttons, ok := data["availableButtons"].([]interface{}); ok {
-			m.logger.Debugf("Available buttons on page: %v", buttons)
-		}
-	}
-
-	m.logger.Debug("Direct Connect not found, checking More dropdown...")
-
-	// Try to find and click the "More" button to reveal Connect option
 	moreResult, err := page.Eval(`() => {
-		// Find More button
-		var buttons = document.querySelectorAll('button');
-		for (var i = 0; i < buttons.length; i++) {
-			var btn = buttons[i];
-			var text = btn.innerText.trim().toLowerCase();
-			var ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-			
-			if (text === 'more' || ariaLabel.indexOf('more') !== -1) {
-				btn.click();
-				return {clicked: true, text: text};
+		// Find the More button in the profile actions area (not sidebar)
+		var profileActions = document.querySelector('.pvs-profile-actions, .pv-top-card-v2-ctas, [class*="profile-actions"]');
+		var moreBtn = null;
+		
+		if (profileActions) {
+			var btns = profileActions.querySelectorAll('button');
+			for (var i = 0; i < btns.length; i++) {
+				var text = btns[i].innerText.trim().toLowerCase();
+				var ariaLabel = (btns[i].getAttribute('aria-label') || '').toLowerCase();
+				if (text === 'more' || ariaLabel.indexOf('more action') !== -1) {
+					moreBtn = btns[i];
+					break;
+				}
 			}
 		}
+		
+		// If not found in profile actions, try all buttons
+		if (!moreBtn) {
+			var allBtns = document.querySelectorAll('button');
+			for (var j = 0; j < allBtns.length; j++) {
+				var txt = allBtns[j].innerText.trim().toLowerCase();
+				var aria = (allBtns[j].getAttribute('aria-label') || '').toLowerCase();
+				// Look for More button that's near Message/Follow buttons (profile area)
+				if (txt === 'more' && aria.indexOf('more action') !== -1) {
+					moreBtn = allBtns[j];
+					break;
+				}
+			}
+		}
+		
+		if (moreBtn) {
+			moreBtn.click();
+			return {clicked: true, method: 'more_button'};
+		}
+		
 		return {clicked: false};
 	}`)
 
@@ -465,50 +480,166 @@ func (m *Manager) findConnectButton(page *rod.Page) (*rod.Element, error) {
 		data := moreResult.Value.Val().(map[string]interface{})
 		if clicked, ok := data["clicked"].(bool); ok && clicked {
 			m.logger.Debug("Clicked More button, waiting for dropdown...")
-			time.Sleep(1500 * time.Millisecond)
+			time.Sleep(2 * time.Second) // Wait for dropdown animation
 
-			// Now look for Connect in the dropdown
-			dropdownResult, err := page.Eval(`() => {
-				// Look for Connect in dropdown menu
-				var menuItems = document.querySelectorAll('.artdeco-dropdown__item, [role="menuitem"], .artdeco-dropdown__content-inner li, div[data-control-name]');
-				for (var i = 0; i < menuItems.length; i++) {
-					var item = menuItems[i];
-					var text = item.innerText.trim().toLowerCase();
-					
-					if (text.indexOf('connect') !== -1 || text === 'add') {
-						item.click();
-						return {success: true, text: text};
-					}
-				}
-				
-				// Also try clicking any visible Connect text
-				var allDivs = document.querySelectorAll('div, span, li');
-				for (var j = 0; j < allDivs.length; j++) {
-					var el = allDivs[j];
-					var txt = el.innerText.trim().toLowerCase();
-					if (txt === 'connect' && el.offsetParent !== null) {
-						el.click();
-						return {success: true, text: 'connect from div/span'};
-					}
-				}
-				
-				return {success: false, menuItems: Array.from(menuItems).map(function(m) { return m.innerText.trim().substring(0, 30); })};
-			}`)
+			// Take screenshot of dropdown for debugging
+			page.MustScreenshot("screenshots/dropdown_open.png")
+			m.logger.Debug("Screenshot saved: screenshots/dropdown_open.png")
 
-			if err == nil && dropdownResult.Value.Val() != nil {
-				data := dropdownResult.Value.Val().(map[string]interface{})
-				if success, ok := data["success"].(bool); ok && success {
-					m.logger.Infof("Clicked Connect from dropdown: %v", data["text"])
-					return nil, nil
-				}
-				if items, ok := data["menuItems"].([]interface{}); ok {
-					m.logger.Debugf("Dropdown menu items: %v", items)
+			// METHOD 1: Use Rod to find Connect text in dropdown using ElementR (regex)
+			m.logger.Debug("Looking for Connect option in dropdown using Rod...")
+
+			// Try to find element containing exactly "Connect" text
+			connectElement, err := page.Timeout(3*time.Second).ElementR("div, span, li", "^Connect$")
+			if err == nil && connectElement != nil {
+				visible, _ := connectElement.Visible()
+				if visible {
+					m.logger.Debug("Found Connect element via Rod ElementR, clicking...")
+					err = connectElement.Click(proto.InputMouseButtonLeft, 1)
+					if err == nil {
+						m.logger.Info("✅ Clicked Connect from dropdown via Rod ElementR")
+						return nil, nil
+					}
+					m.logger.Warnf("Click failed: %v, trying parent...", err)
+					// Try clicking parent
+					parent, _ := connectElement.Parent()
+					if parent != nil {
+						parent.Click(proto.InputMouseButtonLeft, 1)
+						m.logger.Info("✅ Clicked Connect parent element")
+						return nil, nil
+					}
 				}
 			}
+
+			// METHOD 2: Find all elements and look for Connect text
+			m.logger.Debug("Trying to find Connect via Elements...")
+			elements, err := page.Elements("div, span, li, button")
+			if err == nil {
+				for _, el := range elements {
+					text, _ := el.Text()
+					text = strings.TrimSpace(text)
+					if text == "Connect" {
+						visible, _ := el.Visible()
+						box, _ := el.Shape()
+						// Check if it's in the dropdown area (right side of page, upper area)
+						if visible && box != nil && len(box.Quads) > 0 {
+							quad := box.Quads[0]
+							x := quad[0]
+							y := quad[1]
+							// Dropdown is typically on right side (x > 800) and upper area (y < 400)
+							if x > 700 && y < 400 && y > 100 {
+								m.logger.Debugf("Found Connect at x=%.0f, y=%.0f, clicking...", x, y)
+								err = el.Click(proto.InputMouseButtonLeft, 1)
+								if err == nil {
+									m.logger.Info("✅ Clicked Connect from dropdown via element search")
+									return nil, nil
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// METHOD 3: Use JavaScript with simulated mouse click
+			m.logger.Debug("Trying JavaScript mouse event simulation...")
+			jsResult, err := page.Eval(`() => {
+				// Find all elements with "Connect" text
+				var elements = document.querySelectorAll('*');
+				for (var i = 0; i < elements.length; i++) {
+					var el = elements[i];
+					// Check direct text content (not nested)
+					var directText = '';
+					for (var j = 0; j < el.childNodes.length; j++) {
+						if (el.childNodes[j].nodeType === Node.TEXT_NODE) {
+							directText += el.childNodes[j].textContent;
+						}
+					}
+					directText = directText.trim();
+					
+					if (directText === 'Connect') {
+						var rect = el.getBoundingClientRect();
+						// Must be visible and in dropdown area
+						if (rect.width > 0 && rect.height > 0 && rect.top > 100 && rect.top < 400 && rect.left > 700) {
+							// Simulate full click sequence
+							var clickEvent = new MouseEvent('click', {
+								bubbles: true,
+								cancelable: true,
+								view: window,
+								clientX: rect.left + rect.width/2,
+								clientY: rect.top + rect.height/2
+							});
+							el.dispatchEvent(clickEvent);
+							
+							// Also try clicking parent
+							if (el.parentElement) {
+								el.parentElement.click();
+							}
+							
+							return {success: true, method: 'mouse_event', x: rect.left, y: rect.top};
+						}
+					}
+				}
+				return {success: false};
+			}`)
+
+			if err == nil && jsResult.Value.Val() != nil {
+				data := jsResult.Value.Val().(map[string]interface{})
+				if success, ok := data["success"].(bool); ok && success {
+					m.logger.Infof("✅ Clicked Connect via mouse event simulation at x=%.0f, y=%.0f", data["x"], data["y"])
+					return nil, nil
+				}
+			}
+
+			m.logger.Warn("Could not find/click Connect in dropdown")
 		}
 	}
 
-	return nil, fmt.Errorf("connect button not found")
+	// SECOND: Try direct Connect button in profile actions area only
+	m.logger.Debug("Trying direct Connect button in profile actions...")
+	result, err := page.Eval(`() => {
+		// Only look in the main profile actions area, not sidebar
+		var profileActions = document.querySelector('.pvs-profile-actions, .pv-top-card-v2-ctas');
+		if (!profileActions) {
+			return {success: false, reason: 'no_profile_actions'};
+		}
+		
+		var buttons = profileActions.querySelectorAll('button');
+		for (var i = 0; i < buttons.length; i++) {
+			var btn = buttons[i];
+			var text = btn.innerText.trim().toLowerCase();
+			var ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+			
+			// Check for Connect button
+			if (text === 'connect' || ariaLabel.indexOf('invite') !== -1) {
+				var rect = btn.getBoundingClientRect();
+				if (rect.width > 0 && rect.height > 0) {
+					btn.click();
+					return {success: true, method: 'profile_action_connect', text: text};
+				}
+			}
+		}
+		
+		// List available buttons in profile actions for debugging
+		var available = [];
+		for (var j = 0; j < buttons.length; j++) {
+			available.push(buttons[j].innerText.trim().substring(0, 20));
+		}
+		
+		return {success: false, profileButtons: available};
+	}`)
+
+	if err == nil && result.Value.Val() != nil {
+		data := result.Value.Val().(map[string]interface{})
+		if success, ok := data["success"].(bool); ok && success {
+			m.logger.Infof("Clicked Connect button (method: %v)", data["method"])
+			return nil, nil
+		}
+		if buttons, ok := data["profileButtons"].([]interface{}); ok {
+			m.logger.Debugf("Profile action buttons: %v", buttons)
+		}
+	}
+
+	return nil, fmt.Errorf("connect button not found - may need to use More dropdown")
 }
 
 // personalizeMessage replaces template variables with profile data
