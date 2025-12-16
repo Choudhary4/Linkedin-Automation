@@ -28,11 +28,11 @@ type ConnectionRequest struct {
 
 // Message represents a sent message record
 type Message struct {
-	ID         int
-	ProfileURL string
+	ID          int
+	ProfileURL  string
 	ProfileName string
-	Content    string
-	SentAt     time.Time
+	Content     string
+	SentAt      time.Time
 }
 
 // SearchHistory represents a search history record
@@ -292,6 +292,35 @@ func (db *DB) GetPendingConnectionRequests() ([]*ConnectionRequest, error) {
 	rows, err := db.conn.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pending connection requests: %w", err)
+	}
+	defer rows.Close()
+
+	var requests []*ConnectionRequest
+	for rows.Next() {
+		var req ConnectionRequest
+		err := rows.Scan(&req.ID, &req.ProfileURL, &req.ProfileName, &req.Company, &req.Message, &req.SentAt, &req.Status)
+		if err != nil {
+			return nil, err
+		}
+		requests = append(requests, &req)
+	}
+
+	return requests, nil
+}
+
+// GetAcceptedConnectionsWithoutMessage returns accepted connections that haven't been messaged
+func (db *DB) GetAcceptedConnectionsWithoutMessage() ([]*ConnectionRequest, error) {
+	query := `
+		SELECT cr.id, cr.profile_url, cr.profile_name, cr.company, cr.message, cr.sent_at, cr.status
+		FROM connection_requests cr
+		LEFT JOIN messages m ON cr.profile_url = m.profile_url
+		WHERE cr.status = 'accepted' AND m.id IS NULL
+		ORDER BY cr.sent_at DESC
+	`
+
+	rows, err := db.conn.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get accepted connections without message: %w", err)
 	}
 	defer rows.Close()
 

@@ -53,45 +53,10 @@ func (m *Manager) SendMessage(page *rod.Page, profileURL, profileName, message s
 		return fmt.Errorf("reached daily limit of %d messages", m.maxPerDay)
 	}
 
-	// Navigate to messaging page
-	messagingURL := fmt.Sprintf("https://www.linkedin.com/messaging/thread/new/?recipients=%s", extractProfileID(profileURL))
-	if err := page.Navigate(messagingURL); err != nil {
-		// Try alternative: navigate to profile and click Message button
-		if err := m.sendMessageFromProfile(page, profileURL, message); err != nil {
-			return fmt.Errorf("failed to send message: %w", err)
-		}
-		return nil
+	// Navigate to profile and use Message button (most reliable method)
+	if err := m.sendMessageFromProfile(page, profileURL, message); err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
 	}
-
-	m.stealthMgr.HumanDelay()
-
-	// Find message input
-	messageInput, err := page.Timeout(10 * time.Second).Element(".msg-form__contenteditable")
-	if err != nil {
-		return fmt.Errorf("failed to find message input: %w", err)
-	}
-
-	// Type message
-	m.logger.Debug("Typing message...")
-	if err := m.stealthMgr.HumanType(page, messageInput, message); err != nil {
-		return fmt.Errorf("failed to type message: %w", err)
-	}
-
-	m.stealthMgr.HumanDelay()
-
-	// Find and click Send button
-	sendButton, err := page.Timeout(5 * time.Second).Element("button[type='submit'].msg-form__send-button")
-	if err != nil {
-		return fmt.Errorf("failed to find send button: %w", err)
-	}
-
-	m.logger.Debug("Clicking Send button...")
-	if err := m.stealthMgr.HumanClick(page, sendButton); err != nil {
-		return fmt.Errorf("failed to click send button: %w", err)
-	}
-
-	// Wait for confirmation
-	time.Sleep(2 * time.Second)
 
 	// Save to database
 	msg := &storage.Message{
@@ -113,52 +78,298 @@ func (m *Manager) SendMessage(page *rod.Page, profileURL, profileName, message s
 	return nil
 }
 
-// sendMessageFromProfile sends a message by navigating to profile and clicking Message button
+// sendMessageFromProfile sends a message to a 1st-degree connection
 func (m *Manager) sendMessageFromProfile(page *rod.Page, profileURL, message string) error {
-	// Navigate to profile
+	// CRITICAL: Close ALL open chat overlays first to avoid sending to wrong person
+	m.logger.Debug("Closing ALL open chat overlays...")
+	page.Eval(`() => {
+		// Find all X/close buttons in chat overlays and click them
+		const closeSelectors = [
+			'.msg-overlay-bubble-header__control[data-control-name="overlay.close_conversation_window"]',
+			'.msg-overlay-bubble-header button[data-control-name="overlay.close_conversation_window"]',
+			'button.msg-overlay-bubble-header__control',
+			'.msg-overlay-list-bubble__convo-card-container button[aria-label*="Close"]',
+		];
+		
+		for (const selector of closeSelectors) {
+			const btns = document.querySelectorAll(selector);
+			btns.forEach(btn => {
+				try { btn.click(); } catch(e) {}
+			});
+		}
+		
+		// Also click X buttons directly
+		const allBtns = document.querySelectorAll('.msg-overlay-bubble-header button');
+		allBtns.forEach(btn => {
+			const svg = btn.querySelector('svg');
+			if (svg || btn.getAttribute('data-control-name')?.includes('close')) {
+				try { btn.click(); } catch(e) {}
+			}
+		});
+	}`)
+	time.Sleep(2 * time.Second)
+
+	// Navigate to the profile page
+	m.logger.Infof("Navigating to profile: %s", profileURL)
+
 	if err := page.Navigate(profileURL); err != nil {
 		return fmt.Errorf("failed to navigate to profile: %w", err)
 	}
 
-	m.stealthMgr.HumanDelay()
+	time.Sleep(4 * time.Second) // Wait for page to load
 
-	// Find Message button
-	messageButton, err := m.findMessageButton(page)
-	if err != nil {
-		return fmt.Errorf("failed to find message button: %w", err)
+	// Close any chat overlays AGAIN after navigation
+	page.Eval(`() => {
+		const allBtns = document.querySelectorAll('.msg-overlay-bubble-header button');
+		allBtns.forEach(btn => {
+			const svg = btn.querySelector('svg');
+			const name = btn.getAttribute('data-control-name') || '';
+			if (svg || name.includes('close')) {
+				try { btn.click(); } catch(e) {}
+			}
+		});
+	}`)
+	time.Sleep(1 * time.Second)
+
+	// Click Message button on profile - this opens chat overlay for 1st degree connections
+	m.logger.Debug("Looking for Message button on profile...")
+
+	messageClicked := false
+
+	// Method 1: JavaScript - find and click Message button
+	result, _ := page.Eval(`() => {
+		// Look for Message button in profile actions
+		const buttons = document.querySelectorAll('button');
+		for (const btn of buttons) {
+			const text = btn.textContent.trim();
+			if (text === 'Message') {
+				btn.click();
+				return true;
+			}
+		}
+		// Also try aria-label
+		const msgBtn = document.querySelector('button[aria-label*="Message"]');
+		if (msgBtn) {
+			msgBtn.click();
+			return true;
+		}
+		return false;
+	}`)
+	if result != nil && result.Value.Bool() {
+		messageClicked = true
+		m.logger.Info("✅ Clicked Message button via JavaScript")
 	}
 
-	// Click Message button
-	if err := m.stealthMgr.HumanClick(page, messageButton); err != nil {
-		return fmt.Errorf("failed to click message button: %w", err)
+	// Method 2: Direct element selector
+	if !messageClicked {
+		msgBtn, err := page.Timeout(5 * time.Second).Element("button[aria-label*='Message']")
+		if err == nil && msgBtn != nil {
+			if clickErr := msgBtn.Click("left", 1); clickErr == nil {
+				messageClicked = true
+				m.logger.Info("✅ Clicked Message button via element click")
+			}
+		}
 	}
 
-	m.stealthMgr.HumanDelay()
-
-	// Find message input in modal/popup
-	messageInput, err := page.Timeout(10 * time.Second).Element(".msg-form__contenteditable")
-	if err != nil {
-		return fmt.Errorf("failed to find message input: %w", err)
+	if !messageClicked {
+		return fmt.Errorf("failed to find Message button on profile")
 	}
 
-	// Type message
-	if err := m.stealthMgr.HumanType(page, messageInput, message); err != nil {
-		return fmt.Errorf("failed to type message: %w", err)
+	// Wait for chat overlay to open
+	time.Sleep(3 * time.Second)
+
+	// Extract expected name from profile URL for verification
+	expectedUsername := extractProfileID(profileURL)
+
+	// IMPORTANT: Click on the chat header to make sure THIS chat is focused/active
+	page.Eval(`() => {
+		// Find all chat overlays and click on the last one (most recently opened)
+		const overlays = document.querySelectorAll('.msg-overlay-conversation-bubble');
+		if (overlays.length > 0) {
+			const lastOverlay = overlays[overlays.length - 1];
+			lastOverlay.click();
+			// Also click on the contenteditable inside it
+			const input = lastOverlay.querySelector('.msg-form__contenteditable, div[contenteditable="true"]');
+			if (input) {
+				input.focus();
+				input.click();
+			}
+		}
+	}`)
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify we're chatting with the correct person by checking the chat header
+	chatHeaderName, _ := page.Eval(`() => {
+		// Get the name from the most recently opened/focused chat overlay
+		const overlays = document.querySelectorAll('.msg-overlay-conversation-bubble');
+		if (overlays.length > 0) {
+			const lastOverlay = overlays[overlays.length - 1];
+			const header = lastOverlay.querySelector('.msg-overlay-bubble-header__title');
+			if (header) return header.textContent.trim();
+		}
+		return '';
+	}`)
+
+	if chatHeaderName != nil {
+		headerName := chatHeaderName.Value.String()
+		m.logger.Infof("Chat opened with: %s (expected profile: %s)", headerName, expectedUsername)
 	}
 
-	m.stealthMgr.HumanDelay()
+	// Find message input in the LAST (most recently opened) chat overlay
+	m.logger.Debug("Looking for message input in chat overlay...")
 
-	// Find and click Send button
-	sendButton, err := page.Timeout(5 * time.Second).Element("button[type='submit'].msg-form__send-button")
-	if err != nil {
-		return fmt.Errorf("failed to find send button: %w", err)
+	// Use JavaScript to find and focus the input in the LAST chat overlay
+	page.Eval(`() => {
+		const overlays = document.querySelectorAll('.msg-overlay-conversation-bubble');
+		if (overlays.length > 0) {
+			const lastOverlay = overlays[overlays.length - 1];
+			const input = lastOverlay.querySelector('.msg-form__contenteditable, div[contenteditable="true"]');
+			if (input) {
+				input.focus();
+				input.click();
+			}
+		}
+	}`)
+	time.Sleep(500 * time.Millisecond)
+
+	var messageInput *rod.Element
+	inputSelectors := []string{
+		".msg-form__contenteditable",
+		"div[role='textbox'][contenteditable='true']",
 	}
 
-	if err := m.stealthMgr.HumanClick(page, sendButton); err != nil {
-		return fmt.Errorf("failed to click send button: %w", err)
+	for _, sel := range inputSelectors {
+		input, err := page.Timeout(8 * time.Second).Element(sel)
+		if err == nil && input != nil {
+			messageInput = input
+			m.logger.Infof("Found message input with selector: %s", sel)
+			break
+		}
+	}
+
+	if messageInput == nil {
+		return fmt.Errorf("failed to find message input in chat overlay")
+	}
+
+	// Click to focus the input in the LAST overlay
+	messageInput.Click("left", 1)
+	time.Sleep(500 * time.Millisecond)
+
+	// Focus using JavaScript - target the LAST overlay specifically
+	page.Eval(`() => {
+		const overlays = document.querySelectorAll('.msg-overlay-conversation-bubble');
+		if (overlays.length > 0) {
+			const lastOverlay = overlays[overlays.length - 1];
+			const input = lastOverlay.querySelector('.msg-form__contenteditable, div[contenteditable="true"]');
+			if (input) {
+				input.focus();
+				input.click();
+			}
+		}
+	}`)
+	time.Sleep(500 * time.Millisecond)
+
+	// Type the message using keyboard simulation
+	m.logger.Infof("Typing message: %s", message)
+	page.InsertText(message)
+	time.Sleep(1 * time.Second)
+
+	// Verify message was typed in the LAST overlay
+	hasContent, _ := page.Eval(`() => {
+		const overlays = document.querySelectorAll('.msg-overlay-conversation-bubble');
+		if (overlays.length > 0) {
+			const lastOverlay = overlays[overlays.length - 1];
+			const input = lastOverlay.querySelector('.msg-form__contenteditable, div[contenteditable="true"]');
+			const text = input ? input.textContent.trim() : '';
+			return text.length > 0;
+		}
+		return false;
+	}`)
+
+	if hasContent == nil || !hasContent.Value.Bool() {
+		m.logger.Warn("Message not typed via keyboard, trying innerHTML in LAST overlay...")
+		// Alternative: Set innerHTML directly in the LAST overlay
+		escapedMsg := strings.ReplaceAll(message, "'", "\\'")
+		page.Eval(fmt.Sprintf(`() => {
+			const overlays = document.querySelectorAll('.msg-overlay-conversation-bubble');
+			if (overlays.length > 0) {
+				const lastOverlay = overlays[overlays.length - 1];
+				const input = lastOverlay.querySelector('.msg-form__contenteditable, div[contenteditable="true"]');
+				if (input) {
+					input.focus();
+					input.innerHTML = '<p>%s</p>';
+					input.dispatchEvent(new Event('input', { bubbles: true }));
+					input.dispatchEvent(new Event('change', { bubbles: true }));
+				}
+			}
+		}`, escapedMsg))
+		time.Sleep(1 * time.Second)
+	} else {
+		m.logger.Info("✅ Message typed successfully")
+	}
+
+	// Click Send button in the LAST overlay
+	m.logger.Debug("Looking for Send button in LAST overlay...")
+
+	sendClicked := false
+
+	// Method 1: Find Send button in the LAST overlay specifically
+	result, _ = page.Eval(`() => {
+		const overlays = document.querySelectorAll('.msg-overlay-conversation-bubble');
+		if (overlays.length > 0) {
+			const lastOverlay = overlays[overlays.length - 1];
+			const sendBtn = lastOverlay.querySelector('.msg-form__send-button');
+			if (sendBtn && !sendBtn.disabled) {
+				sendBtn.click();
+				return true;
+			}
+		}
+		return false;
+	}`)
+	if result != nil && result.Value.Bool() {
+		sendClicked = true
+		m.logger.Info("✅ Clicked Send button via class selector in LAST overlay")
+	}
+
+	// Method 2: Find Send button by text in LAST overlay
+	if !sendClicked {
+		result, _ := page.Eval(`() => {
+			const overlays = document.querySelectorAll('.msg-overlay-conversation-bubble');
+			if (overlays.length > 0) {
+				const lastOverlay = overlays[overlays.length - 1];
+				const buttons = lastOverlay.querySelectorAll('button');
+				for (const btn of buttons) {
+					if (btn.textContent.trim() === 'Send' && !btn.disabled) {
+						btn.click();
+						return true;
+					}
+				}
+			}
+			return false;
+		}`)
+		if result != nil && result.Value.Bool() {
+			sendClicked = true
+			m.logger.Info("✅ Clicked Send button via text match in LAST overlay")
+		}
+	}
+
+	// Method 3: Direct element click
+	if !sendClicked {
+		sendBtn, err := page.Timeout(3 * time.Second).Element("button.msg-form__send-button")
+		if err == nil && sendBtn != nil {
+			if clickErr := sendBtn.Click("left", 1); clickErr == nil {
+				sendClicked = true
+				m.logger.Info("✅ Clicked Send button via element click")
+			}
+		}
+	}
+
+	if !sendClicked {
+		return fmt.Errorf("failed to click Send button - button may be disabled (message not typed?)")
 	}
 
 	time.Sleep(2 * time.Second)
+	m.logger.Info("✅ Message sent successfully!")
 
 	return nil
 }
@@ -244,6 +455,19 @@ func (m *Manager) SendBulkMessages(page *rod.Page, recipients []struct {
 func (m *Manager) DetectNewConnections(page *rod.Page) ([]*storage.ConnectionRequest, error) {
 	m.logger.Info("Detecting new connections...")
 
+	// First, get accepted connections that haven't been messaged yet
+	accepted, err := m.db.GetAcceptedConnectionsWithoutMessage()
+	if err != nil {
+		m.logger.Warnf("Failed to get accepted connections: %v", err)
+	}
+
+	// Start with already accepted but not messaged connections
+	var newConnections []*storage.ConnectionRequest
+	if len(accepted) > 0 {
+		m.logger.Infof("Found %d accepted connections awaiting messages", len(accepted))
+		newConnections = append(newConnections, accepted...)
+	}
+
 	// Get pending connection requests from database
 	pending, err := m.db.GetPendingConnectionRequests()
 	if err != nil {
@@ -252,10 +476,12 @@ func (m *Manager) DetectNewConnections(page *rod.Page) ([]*storage.ConnectionReq
 
 	if len(pending) == 0 {
 		m.logger.Info("No pending connection requests to check")
+		if len(newConnections) > 0 {
+			m.logger.Infof("Found %d confirmed new connections", len(newConnections))
+			return newConnections, nil
+		}
 		return nil, nil
 	}
-
-	var newConnections []*storage.ConnectionRequest
 
 	// Check each pending request
 	for _, request := range pending {
