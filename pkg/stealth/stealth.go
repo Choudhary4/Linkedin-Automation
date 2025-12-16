@@ -331,12 +331,12 @@ func (m *Manager) WaitForOperatingHours() {
 	}
 }
 
-// SimulateBreak simulates a random break period (coffee, lunch, etc.)
+// SimulateBreak simulates a random break period
 func (m *Manager) SimulateBreak() {
-	// 5% chance of taking a break after any action
+	// 5% chance of taking a short break after any action
 	if m.rand.Float64() < 0.05 {
-		breakDuration := time.Duration(3+m.rand.Intn(10)) * time.Minute
-		m.logger.Infof("Taking a break for %v", breakDuration)
+		breakDuration := time.Duration(10+m.rand.Intn(20)) * time.Second // 10-30 seconds
+		m.logger.Infof("Taking a short break for %v", breakDuration)
 		time.Sleep(breakDuration)
 	}
 }
