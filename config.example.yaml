@@ -1,0 +1,39 @@
+linkedin:
+  email: ""
+  password: ""
+
+app:
+  log_level: "info"
+
+browser:
+  headless: false
+  slow_motion: 0
+
+connections:
+  max_per_day: 20
+  max_per_hour: 5
+
+messaging:
+  max_per_day: 15
+  default_message_template: "Hi {firstName}, I'd love to connect with you!"
+
+search:
+  default_keywords:
+    - "Software Engineer"
+    - "Product Manager"
+  default_location: "United States"
+
+stealth:
+  min_action_delay: 2000
+  max_action_delay: 5000
+  enable_random_scroll: true
+  enable_typing_simulation: true
+  enable_mouse_hover: true
+  operating_hours_start: 9
+  operating_hours_end: 17
+
+database:
+  path: "./data/subspace.db"
+
+session:
+  path: "./data/sessions"

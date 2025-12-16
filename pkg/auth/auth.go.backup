@@ -1,0 +1,411 @@
+package auth
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/proto"
+	"github.com/saurabhkuntal/subspace/pkg/stealth"
+	"github.com/sirupsen/logrus"
+)
+
+// Authenticator handles LinkedIn authentication
+type Authenticator struct {
+	email       string
+	password    string
+	sessionPath string
+	stealthMgr  *stealth.Manager
+	logger      *logrus.Logger
+}
+
+// NewAuthenticator creates a new authenticator
+func NewAuthenticator(email, password, sessionPath string, stealthMgr *stealth.Manager, logger *logrus.Logger) *Authenticator {
+	return &Authenticator{
+		email:       email,
+		password:    password,
+		sessionPath: sessionPath,
+		stealthMgr:  stealthMgr,
+		logger:      logger,
+	}
+}
+
+// Login performs the login process
+func (a *Authenticator) Login(page *rod.Page) error {
+	a.logger.Info("Starting login process...")
+
+	// Try to load existing session first
+	if err := a.LoadSession(page); err == nil {
+		a.logger.Info("Loaded existing session")
+
+		// Verify session is still valid
+		if a.IsLoggedIn(page) {
+			a.logger.Info("Session is valid, login successful")
+			return nil
+		}
+
+		a.logger.Warn("Session expired, performing fresh login")
+	}
+
+	// Navigate to LinkedIn login page with retry
+	var err error
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			a.logger.Infof("Retrying navigation to login page (attempt %d/3)...", i+1)
+			time.Sleep(time.Duration(2+i*2) * time.Second)
+		}
+		err = page.Timeout(30 * time.Second).Navigate("https://www.linkedin.com/login")
+		if err == nil {
+			break
+		}
+		a.logger.Warnf("Navigation attempt %d failed: %v", i+1, err)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to navigate to login page after 3 attempts: %w", err)
+	}
+
+	// Wait for page to load and settle
+	page.WaitLoad()
+	page.WaitDOMStable(time.Second, 0.1)
+	a.stealthMgr.HumanDelay()
+	a.logger.Debugf("Current URL: %s", page.MustInfo().URL)
+
+	// Check for security checkpoint or captcha
+	if a.HasSecurityCheckpoint(page) {
+		return fmt.Errorf("security checkpoint detected - manual intervention required")
+	}
+
+	// Find email input with multiple attempts and selector fallbacks
+	a.logger.Debug("Looking for email input field...")
+	emailInput, emailSelector, err := findFirstElement(page, 15*time.Second, []string{
+		"#username",
+		"#session_key",
+		"input[name='session_key']",
+		"input[name='username']",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to find email input after trying common selectors: %w", err)
+	}
+
+	// Type email with human-like behavior
+	a.logger.Debug("Entering email...")
+	if err := a.stealthMgr.HumanType(page, emailInput, a.email); err != nil {
+		a.logger.Warnf("Human typing failed for email field: %v; falling back to direct input", err)
+		if _, focusErr := emailInput.Eval(`() => this.focus()`); focusErr != nil {
+			a.logger.Debugf("Failed to focus email input via JS: %v", focusErr)
+		}
+		if _, scrollErr := emailInput.Eval(`el => el.scrollIntoView({ behavior: 'smooth', block: 'center' })`); scrollErr != nil {
+			a.logger.Debugf("Failed to scroll email input into view: %v", scrollErr)
+		}
+		if fallbackErr := emailInput.Input(a.email); fallbackErr != nil {
+			a.logger.Warnf("Direct input failed for email field: %v; injecting value via JS", fallbackErr)
+			if refreshedEl, _, refreshErr := findFirstElement(page, 5*time.Second, []string{emailSelector}); refreshErr == nil {
+				emailInput = refreshedEl
+			}
+			setScript := `(selector, value) => {
+				const el = document.querySelector(selector);
+				if (!el) {
+					return false;
+				}
+				el.focus();
+				const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+				if (setter) {
+					setter.call(el, value);
+				} else {
+					el.value = value;
+				}
+				el.dispatchEvent(new Event('input', { bubbles: true }));
+				el.dispatchEvent(new Event('change', { bubbles: true }));
+				return el.value === value;
+			}`
+			result, jsErr := page.Timeout(12*time.Second).Eval(setScript, emailSelector, a.email)
+			if jsErr != nil {
+				return fmt.Errorf("failed to enter email even with fallback: %w", jsErr)
+			}
+			if !result.Bool() {
+				return fmt.Errorf("failed to confirm email value after JS injection")
+			}
+		}
+	}
+
+	a.stealthMgr.HumanDelay()
+
+	// Find password input with fallbacks
+	passwordInput, passwordSelector, err := findFirstElement(page, 12*time.Second, []string{
+		"#password",
+		"#session_password",
+		"input[name='session_password']",
+		"input[type='password']",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to find password input: %w", err)
+	}
+
+	// Type password with human-like behavior
+	a.logger.Debug("Entering password...")
+	if err := a.stealthMgr.HumanType(page, passwordInput, a.password); err != nil {
+		a.logger.Warnf("Human typing failed for password field: %v; falling back to direct input", err)
+		if _, focusErr := passwordInput.Eval(`() => this.focus()`); focusErr != nil {
+			a.logger.Debugf("Failed to focus password input via JS: %v", focusErr)
+		}
+		if _, scrollErr := passwordInput.Eval(`el => el.scrollIntoView({ behavior: 'smooth', block: 'center' })`); scrollErr != nil {
+			a.logger.Debugf("Failed to scroll password input into view: %v", scrollErr)
+		}
+		if fallbackErr := passwordInput.Input(a.password); fallbackErr != nil {
+			a.logger.Warnf("Direct input failed for password field: %v; injecting value via JS", fallbackErr)
+			if refreshedEl, _, refreshErr := findFirstElement(page, 5*time.Second, []string{passwordSelector}); refreshErr == nil {
+				passwordInput = refreshedEl
+			}
+			setScript := `(selector, value) => {
+				const el = document.querySelector(selector);
+				if (!el) {
+					return false;
+				}
+				el.focus();
+				const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+				if (setter) {
+					setter.call(el, value);
+				} else {
+					el.value = value;
+				}
+				el.dispatchEvent(new Event('input', { bubbles: true }));
+				el.dispatchEvent(new Event('change', { bubbles: true }));
+				return el.value === value;
+			}`
+			result, jsErr := page.Timeout(12*time.Second).Eval(setScript, passwordSelector, a.password)
+			if jsErr != nil {
+				return fmt.Errorf("failed to enter password even with fallback: %w", jsErr)
+			}
+			if !result.Bool() {
+				return fmt.Errorf("failed to confirm password value after JS injection")
+			}
+		}
+	}
+
+	a.stealthMgr.HumanDelay()
+
+	// Find and click login button
+	loginButton, err := page.Timeout(10 * time.Second).Element("button[type='submit']")
+	if err != nil {
+		return fmt.Errorf("failed to find login button: %w", err)
+	}
+
+	a.logger.Debug("Clicking login button...")
+	if err := a.stealthMgr.HumanClick(page, loginButton); err != nil {
+		return fmt.Errorf("failed to click login button: %w", err)
+	}
+
+	// Wait for navigation - give more time for slow networks
+	a.logger.Debug("Waiting for login to complete...")
+	time.Sleep(8 * time.Second)
+
+	// Log current URL for debugging
+	currentURL := page.MustInfo().URL
+	a.logger.Debugf("After login, current URL: %s", currentURL)
+
+	// Check for login errors
+	if a.HasLoginError(page) {
+		return fmt.Errorf("login failed - invalid credentials or account issue")
+	}
+
+	// Check for 2FA or verification
+	if a.HasSecurityCheckpoint(page) {
+		return fmt.Errorf("2FA or security verification required - manual intervention needed")
+	}
+
+	// Verify login was successful
+	if !a.IsLoggedIn(page) {
+		return fmt.Errorf("login verification failed")
+	}
+
+	a.logger.Info("Login successful!")
+
+	// Save session for future use
+	if err := a.SaveSession(page); err != nil {
+		a.logger.Warnf("Failed to save session: %v", err)
+	}
+
+	return nil
+}
+
+// IsLoggedIn checks if the user is currently logged in
+func (a *Authenticator) IsLoggedIn(page *rod.Page) bool {
+	// Try to find elements that only appear when logged in
+	_, err := page.Timeout(5 * time.Second).Element("nav.global-nav")
+	if err == nil {
+		return true
+	}
+
+	// Alternative check: look for profile icon
+	_, err = page.Timeout(5 * time.Second).Element(".global-nav__me")
+	return err == nil
+}
+
+// HasLoginError checks if there's a login error message
+func (a *Authenticator) HasLoginError(page *rod.Page) bool {
+	// Look for error messages
+	_, err := page.Timeout(2 * time.Second).Element(".alert--error")
+	if err == nil {
+		return true
+	}
+
+	_, err = page.Timeout(2 * time.Second).Element("#error-for-password")
+	return err == nil
+}
+
+// HasSecurityCheckpoint checks if there's a security checkpoint (2FA, captcha, etc.)
+func (a *Authenticator) HasSecurityCheckpoint(page *rod.Page) bool {
+	// Check for verification code input
+	_, err := page.Timeout(2 * time.Second).Element("#input__email_verification_pin")
+	if err == nil {
+		a.logger.Warn("Email verification required")
+		return true
+	}
+
+	// Check for phone verification
+	_, err = page.Timeout(2 * time.Second).Element("#input__phone_verification_pin")
+	if err == nil {
+		a.logger.Warn("Phone verification required")
+		return true
+	}
+
+	// Check for captcha
+	_, err = page.Timeout(2 * time.Second).Element(".g-recaptcha")
+	if err == nil {
+		a.logger.Warn("Captcha detected")
+		return true
+	}
+
+	return false
+}
+
+// SaveSession saves the current session cookies to disk
+func (a *Authenticator) SaveSession(page *rod.Page) error {
+	// Ensure session directory exists
+	if err := os.MkdirAll(a.sessionPath, 0755); err != nil {
+		return fmt.Errorf("failed to create session directory: %w", err)
+	}
+
+	// Get all cookies
+	cookies, err := page.Cookies([]string{"https://www.linkedin.com"})
+		if fallbackErr := emailInput.Input(a.email); fallbackErr != nil {
+			a.logger.Warnf("Direct input failed for email field: %v; injecting value via JS", fallbackErr)
+			if refreshedEl, _, refreshErr := findFirstElement(page, 5*time.Second, []string{emailSelector}); refreshErr == nil {
+				emailInput = refreshedEl
+			}
+			setScript := `(selector, value) => {
+				const el = document.querySelector(selector);
+				if (!el) {
+					return false;
+				}
+				el.focus();
+				const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+				if (setter) {
+					setter.call(el, value);
+				} else {
+					el.value = value;
+				}
+				el.dispatchEvent(new Event('input', { bubbles: true }));
+				el.dispatchEvent(new Event('change', { bubbles: true }));
+				return el.value === value;
+			}`
+			result, jsErr := page.Timeout(12*time.Second).Eval(setScript, emailSelector, a.email)
+			if jsErr != nil {
+				return fmt.Errorf("failed to enter email even with fallback: %w", jsErr)
+					a.logger.Warnf("Human typing failed for password field: %v; falling back to direct input", err)
+			if !result.Bool() {
+				return fmt.Errorf("failed to confirm email value after JS injection")
+			}
+		}
+	data, err := os.ReadFile(cookiesPath)
+	if err != nil {
+		return fmt.Errorf("failed to read cookies: %w", err)
+	}
+
+	// Unmarshal cookies
+	var cookies []*proto.NetworkCookie
+	if err := json.Unmarshal(data, &cookies); err != nil {
+		return fmt.Errorf("failed to unmarshal cookies: %w", err)
+	}
+
+	// Convert cookies to cookie params
+	cookieParams := make([]*proto.NetworkCookieParam, len(cookies))
+	for i, cookie := range cookies {
+		cookieParams[i] = &proto.NetworkCookieParam{
+			Name:     cookie.Name,
+			Value:    cookie.Value,
+			Domain:   cookie.Domain,
+			Path:     cookie.Path,
+			Secure:   cookie.Secure,
+			HTTPOnly: cookie.HTTPOnly,
+			SameSite: cookie.SameSite,
+		}
+	}
+
+	// Set cookies in browser
+	if err := page.SetCookies(cookieParams); err != nil {
+		return fmt.Errorf("failed to set cookies: %w", err)
+	}
+
+	// Navigate to LinkedIn to activate session
+	if err := page.Navigate("https://www.linkedin.com/feed/"); err != nil {
+		return fmt.Errorf("failed to navigate after loading session: %w", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	a.logger.Debug("Session loaded successfully")
+	return nil
+}
+
+// ClearSession clears the saved session
+func (a *Authenticator) ClearSession() error {
+	cookiesPath := filepath.Join(a.sessionPath, "cookies.json")
+
+	if err := os.Remove(cookiesPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to clear session: %w", err)
+	}
+
+	a.logger.Debug("Session cleared")
+	return nil
+}
+
+// findFirstElement tries a list of selectors with a shared timeout and returns the first match.
+func findFirstElement(page *rod.Page, timeout time.Duration, selectors []string) (*rod.Element, string, error) {
+	for _, selector := range selectors {
+		tmp := page.Timeout(timeout)
+		el, err := tmp.Element(selector)
+		tmp.CancelTimeout()
+		if err != nil {
+			continue
+		}
+
+		// Ensure the element is visible and interactable
+		visible, visErr := el.Eval(`() => {
+			const rect = this.getBoundingClientRect();
+			const style = window.getComputedStyle(this);
+			return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+		}`)
+		if visErr != nil {
+			continue
+		}
+		if visible.Nil() {
+			continue
+		}
+		if !visible.Bool() {
+			continue
+		}
+
+		stableEl, stableErr := page.Element(selector)
+		if stableErr != nil {
+			// Fall back to element we already found even if it might be stale later
+			return el, selector, nil
+		}
+
+		return stableEl, selector, nil
+	}
+	return nil, "", fmt.Errorf("no element found for selectors: %v", selectors)
+}

@@ -1,0 +1,272 @@
+SubSpace - LinkedIn Automation Tool
+=====================================
+
+Project Structure:
+==================
+
+SubSpace/
+│
+├── 📄 Core Application Files
+│   ├── main.go                          # Application entry point (380 lines)
+│   ├── go.mod                           # Go module dependencies
+│   ├── go.sum                           # Dependency checksums (auto-generated)
+│   └── Makefile                         # Build automation commands
+│
+├── 🔧 Configuration Files
+│   ├── .env.example                     # Environment variable template
+│   ├── config.example.yaml              # YAML configuration template
+│   └── setup.sh                         # Automated setup script
+│
+├── 📚 Documentation Files
+│   ├── README.md                        # Comprehensive project documentation (550 lines)
+│   ├── DEVELOPMENT.md                   # Developer guide (280 lines)
+│   ├── TROUBLESHOOTING.md               # Common issues & solutions (480 lines)
+│   ├── PROJECT_SUMMARY.md               # Project overview & statistics
+│   ├── SUBMISSION_CHECKLIST.md          # Pre-submission verification
+│   ├── QUICK_REFERENCE.md               # Command reference guide
+│   └── PROJECT_TREE.txt                 # This file - project structure
+│
+├── 📦 Source Code Packages (pkg/)
+│   │
+│   ├── auth/                            # Authentication & Session Management
+│   │   └── auth.go                      # Login, session persistence, security (280 lines)
+│   │
+│   ├── config/                          # Configuration Management
+│   │   └── config.go                    # Env vars, YAML, validation (310 lines)
+│   │
+│   ├── connection/                      # Connection Request Automation
+│   │   └── connection.go                # Send requests, rate limiting (260 lines)
+│   │
+│   ├── messaging/                       # Messaging System
+│   │   └── messaging.go                 # Send messages, detect connections (280 lines)
+│   │
+│   ├── search/                          # Search & Targeting
+│   │   └── search.go                    # People search, pagination (320 lines)
+│   │
+│   ├── stealth/                         # Anti-Detection Mechanisms
+│   │   ├── stealth.go                   # Human behavior simulation (450 lines)
+│   │   └── browser.go                   # Fingerprint masking (240 lines)
+│   │
+│   └── storage/                         # Database & Persistence
+│       └── database.go                  # SQLite operations (320 lines)
+│
+├── 💾 Data Storage (data/)              # Created at runtime
+│   ├── subspace.db                      # SQLite database
+│   └── sessions/                        # Session cookies directory
+│       └── cookies.json                 # Saved session cookies
+│
+├── 🔒 Security Files
+│   ├── .gitignore                       # Git exclusions (sensitive files)
+│   ├── LICENSE                          # MIT License with disclaimer
+│   └── .env                             # Your credentials (NOT in repo)
+│
+└── 📊 Statistics
+    ├── Total Files: 24
+    ├── Total Lines of Code: ~2,800
+    ├── Packages: 7
+    ├── Documentation Files: 7
+    ├── Stealth Techniques: 10
+    └── Database Tables: 3
+
+
+Package Responsibilities:
+=========================
+
+┌─────────────────────────────────────────────────────────────────┐
+│ auth/                                                           │
+│ • LinkedIn login automation                                     │
+│ • Session cookie persistence                                    │
+│ • Security checkpoint detection (2FA, captcha)                  │
+│ • Login failure handling                                        │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ config/                                                         │
+│ • Environment variable loading                                  │
+│ • YAML configuration support                                    │
+│ • Configuration validation                                      │
+│ • Default value management                                      │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ connection/                                                     │
+│ • Automated connection requests                                 │
+│ • Personalized note support                                     │
+│ • Daily/hourly rate limiting                                    │
+│ • Request status tracking                                       │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ messaging/                                                      │
+│ • Automated message sending                                     │
+│ • New connection detection                                      │
+│ • Template variable substitution                                │
+│ • Message history tracking                                      │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ search/                                                         │
+│ • LinkedIn people search                                        │
+│ • Keyword, location, company filtering                          │
+│ • Multi-page pagination handling                                │
+│ • Duplicate profile detection                                   │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ stealth/                                                        │
+│ • Human-like mouse movement (Bézier curves)                     │
+│ • Randomized timing patterns                                    │
+│ • Browser fingerprint masking                                   │
+│ • Scrolling, typing, hovering simulation                        │
+│ • Operating hours enforcement                                   │
+│ • Break simulation                                              │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ storage/                                                        │
+│ • SQLite database operations                                    │
+│ • Connection request tracking                                   │
+│ • Message history storage                                       │
+│ • Search history logging                                        │
+│ • Rate limit checking                                           │
+└─────────────────────────────────────────────────────────────────┘
+
+
+Anti-Detection Techniques:
+==========================
+
+Mandatory (3/3):
+✓ 1. Human-like Mouse Movement
+     - Bézier curve trajectories
+     - Variable speed (slow start/end, fast middle)
+     - Micro-corrections and overshoot
+     - Natural hovering
+
+✓ 2. Randomized Timing Patterns
+     - Random delays (2-5 seconds)
+     - Human "thinking time" (1-4 seconds)
+     - 10% chance of long pauses
+
+✓ 3. Browser Fingerprint Masking
+     - Remove navigator.webdriver
+     - Random user agents (6 variations)
+     - Plugin property masking
+     - Screen property randomization
+
+Additional (7/5 Required):
+✓ 4. Random Scrolling Behavior
+✓ 5. Realistic Typing Simulation
+✓ 6. Mouse Hovering & Movement
+✓ 7. Activity Scheduling (9-5 PM)
+✓ 8. Rate Limiting & Throttling
+✓ 9. Random Break Simulation
+✓ 10. Random Viewport Sizes
+
+
+Database Schema:
+================
+
+connection_requests
+├── id (INTEGER PRIMARY KEY)
+├── profile_url (TEXT UNIQUE)
+├── profile_name (TEXT)
+├── company (TEXT)
+├── message (TEXT)
+├── sent_at (DATETIME)
+└── status (TEXT: pending/accepted/rejected)
+
+messages
+├── id (INTEGER PRIMARY KEY)
+├── profile_url (TEXT)
+├── profile_name (TEXT)
+├── content (TEXT)
+└── sent_at (DATETIME)
+
+search_history
+├── id (INTEGER PRIMARY KEY)
+├── query (TEXT)
+├── location (TEXT)
+├── result_count (INTEGER)
+└── searched_at (DATETIME)
+
+
+Quick Commands:
+===============
+
+Setup:
+  ./setup.sh                              # Automated setup
+  make build                              # Build application
+
+Search:
+  ./subspace -action=search -keywords="Software Engineer"
+
+Connect:
+  ./subspace -action=connect -keywords="Product Manager" -max-results=10
+
+Message:
+  ./subspace -action=message -message="Thanks for connecting!"
+
+Debug:
+  LOG_LEVEL=debug HEADLESS=false ./subspace -action=search
+
+
+File Locations:
+===============
+
+Configuration:
+  .env                                    # Your credentials (create from .env.example)
+  config.yaml                             # Optional YAML config
+
+Database:
+  data/subspace.db                        # SQLite database
+  data/sessions/cookies.json              # Session cookies
+
+Logs:
+  stdout/stderr                           # Default logging output
+  subspace.log                            # Optional log file (redirect)
+
+
+Important Notes:
+================
+
+⚠️  EDUCATIONAL PURPOSE ONLY
+    This tool violates LinkedIn's Terms of Service.
+    Use only for learning and technical evaluation.
+
+🔒 SECURITY
+    - Never commit .env file
+    - Use test accounts only
+    - Keep credentials secure
+    - Review logs for sensitive data
+
+📊 RATE LIMITS
+    - Default: 20 connections/day, 5/hour
+    - Default: 15 messages/day
+    - Enforced by database tracking
+
+🎯 SUBMISSION
+    - Repository: https://github.com/saurabhkuntal/subspace
+    - Form: https://forms.gle/fgbMxgUS19QRKGPa9
+
+
+Project Status:
+===============
+
+✅ All functional requirements implemented
+✅ 10 stealth techniques active
+✅ Clean, modular architecture
+✅ Comprehensive documentation
+✅ Database persistence
+✅ Configuration flexibility
+✅ Error handling & logging
+
+⏳ Pending: Demo video & submission
+
+
+For more information, see:
+===========================
+- README.md           - Full documentation
+- QUICK_REFERENCE.md  - Command reference
+- TROUBLESHOOTING.md  - Common issues
+- DEVELOPMENT.md      - Technical guide
+
