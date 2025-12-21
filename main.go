@@ -207,13 +207,14 @@ func runInteractiveMode(page *rod.Page, searcher *search.Searcher, connMgr *conn
 		fmt.Println("\n1. 🔍 Search for people")
 		fmt.Println("2. 🤝 Search and send connection requests")
 		fmt.Println("3. 💬 Send messages to new connections")
-		fmt.Println("4. 👥 View new connections")
-		fmt.Println("5. 📊 View activity statistics")
-		fmt.Println("6. ⚙️  Change settings")
-		fmt.Println("7. 🔥 Account warm-up session")
-		fmt.Println("8. 🧹 Clear session (fixes anti-bot blocks)")
-		fmt.Println("9. 🚪 Exit")
-		fmt.Print("\nEnter your choice (1-9): ")
+		fmt.Println("4. 🔁 Send auto follow-up to replies")
+		fmt.Println("5. 👥 View new connections")
+		fmt.Println("6. 📊 View activity statistics")
+		fmt.Println("7. ⚙️  Change settings")
+		fmt.Println("8. 🔥 Account warm-up session")
+		fmt.Println("9. 🧹 Clear session (fixes anti-bot blocks)")
+		fmt.Println("10. 🚪 Exit")
+		fmt.Print("\nEnter your choice (1-10): ")
 		choice := readInput()
 
 		switch choice {
@@ -224,18 +225,20 @@ func runInteractiveMode(page *rod.Page, searcher *search.Searcher, connMgr *conn
 		case "3":
 			interactiveMessage(page, msgMgr, logger)
 		case "4":
+			interactiveFollowUp(page, msgMgr, logger)
+		case "5":
 			performDetectConnections(page, msgMgr, logger)
 			fmt.Print("\nPress Enter to continue...")
 			readInput()
-		case "5":
-			showStatistics(cfg, logger)
 		case "6":
-			changeSettings(cfg, logger)
+			showStatistics(cfg, logger)
 		case "7":
-			performWarmUp(page, logger)
+			changeSettings(cfg, logger)
 		case "8":
-			performClearSession(page, cfg, logger)
+			performWarmUp(page, logger)
 		case "9":
+			performClearSession(page, cfg, logger)
+		case "10":
 			fmt.Println("\n👋 Thank you for using SubSpace! Goodbye!")
 			return
 		default:
@@ -469,6 +472,64 @@ func interactiveMessage(page *rod.Page, msgMgr *messaging.Manager, logger *logru
 	}
 
 	fmt.Printf("\n✅ Successfully sent %d out of %d messages!\n", successCount, len(recipients))
+	fmt.Print("\nPress Enter to continue...")
+	readInput()
+}
+
+func interactiveFollowUp(page *rod.Page, msgMgr *messaging.Manager, logger *logrus.Logger) {
+	fmt.Println("\n" + strings.Repeat("-", 60))
+	fmt.Println("🔁 AUTO FOLLOW-UP TO REPLIES")
+	fmt.Println(strings.Repeat("-", 60))
+
+	// Step 1: Check for new replies
+	fmt.Println("\n🔍 Checking for new replies in your inbox...")
+	err := msgMgr.CheckForReplies(page)
+	if err != nil {
+		logger.Errorf("Failed to check for replies: %v", err)
+		fmt.Println("\n❌ Failed to check for replies. Please try again.")
+		fmt.Print("\nPress Enter to continue...")
+		readInput()
+		return
+	}
+
+	// Step 2: Get conversations needing follow-up
+	fmt.Println("\n📋 Looking for conversations needing follow-up...")
+	time.Sleep(1 * time.Second)
+
+	// Ask for follow-up message
+	fmt.Print("\nEnter your follow-up message (use {firstName} or {name} for personalization): ")
+	fmt.Println("\nExample: Thanks for your reply, {firstName}! I'd be happy to discuss further.")
+	fmt.Print("\nYour message: ")
+	followUpMsg := readInput()
+
+	if followUpMsg == "" {
+		followUpMsg = "Thanks for your reply, {firstName}! I appreciate you taking the time to respond."
+	}
+
+	// Confirm before sending
+	fmt.Print("\nAre you sure you want to send follow-up messages? (yes/no): ")
+	confirm := readInput()
+
+	if strings.ToLower(confirm) != "yes" && strings.ToLower(confirm) != "y" {
+		fmt.Println("\n❌ Follow-up cancelled.")
+		fmt.Print("\nPress Enter to continue...")
+		readInput()
+		return
+	}
+
+	// Send follow-ups
+	fmt.Println("\n📤 Sending follow-up messages...")
+	successCount, err := msgMgr.SendFollowUpMessages(page, followUpMsg)
+	if err != nil {
+		logger.Errorf("Failed to send follow-ups: %v", err)
+	}
+
+	if successCount == 0 {
+		fmt.Println("\n✅ No conversations need follow-up at this time.")
+	} else {
+		fmt.Printf("\n✅ Successfully sent %d follow-up message(s)!\n", successCount)
+	}
+
 	fmt.Print("\nPress Enter to continue...")
 	readInput()
 }

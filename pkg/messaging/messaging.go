@@ -584,3 +584,153 @@ func extractProfileID(profileURL string) string {
 	username := strings.TrimSuffix(parts[1], "/")
 	return username
 }
+
+// CheckForReplies checks messaging inbox for new replies
+func (m *Manager) CheckForReplies(page *rod.Page) error {
+	m.logger.Info("Checking for new replies...")
+
+	// Navigate to messaging page
+	if err := page.Navigate("https://www.linkedin.com/messaging/"); err != nil {
+		return fmt.Errorf("failed to navigate to messaging: %w", err)
+	}
+
+	time.Sleep(4 * time.Second)
+
+	// Get all conversations with unread messages using JavaScript
+	conversations, err := page.Eval(`() => {
+		const convos = [];
+		const convItems = document.querySelectorAll('.msg-conversation-listitem');
+		
+		for (const item of convItems) {
+			// Check if there's an unread indicator
+			const unread = item.querySelector('.msg-conversation-card__unread-count');
+			if (!unread) continue;
+			
+			// Get profile name
+			const nameEl = item.querySelector('.msg-conversation-listitem__participant-names');
+			const name = nameEl ? nameEl.textContent.trim() : '';
+			
+			// Get profile link
+			const link = item.querySelector('a[href*="/in/"]');
+			const href = link ? link.getAttribute('href') : '';
+			
+			// Get last message preview
+			const msgEl = item.querySelector('.msg-conversation-card__message-snippet-body');
+			const lastMsg = msgEl ? msgEl.textContent.trim() : '';
+			
+			if (name && href) {
+				convos.push({
+					name: name,
+					profileURL: href.split('?')[0], // Remove query params
+					lastMessage: lastMsg
+				});
+			}
+		}
+		
+		return convos;
+	}`)
+
+	if err != nil {
+		return fmt.Errorf("failed to get conversations: %w", err)
+	}
+
+	// Parse results
+	convListJSON := conversations.Value.Arr()
+	m.logger.Infof("Found %d conversations with unread messages", len(convListJSON))
+
+	for _, convJSON := range convListJSON {
+		convObj := convJSON.Map()
+		name := convObj["name"].Str()
+		profileURL := convObj["profileURL"].Str()
+		lastMessage := convObj["lastMessage"].Str()
+
+		// Ensure full URL
+		if !strings.HasPrefix(profileURL, "http") {
+			profileURL = "https://www.linkedin.com" + profileURL
+		}
+
+		m.logger.Infof("New reply from %s: %s", name, lastMessage)
+
+		// Save conversation with reply
+		conversation := &storage.Conversation{
+			ProfileURL:          profileURL,
+			ProfileName:         name,
+			LastMessageFromThem: lastMessage,
+			LastMessageTime:     time.Now(),
+			LastCheckedAt:       time.Now(),
+			FollowUpSent:        false,
+		}
+
+		if err := m.db.SaveOrUpdateConversation(conversation); err != nil {
+			m.logger.Errorf("Failed to save conversation: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// SendFollowUpMessages sends follow-up messages to people who replied
+func (m *Manager) SendFollowUpMessages(page *rod.Page, followUpMessage string) (int, error) {
+	m.logger.Info("Sending follow-up messages to people who replied...")
+
+	// Get conversations needing follow-up
+	conversations, err := m.db.GetConversationsNeedingFollowUp()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get conversations: %w", err)
+	}
+
+	if len(conversations) == 0 {
+		m.logger.Info("No conversations need follow-up")
+		return 0, nil
+	}
+
+	m.logger.Infof("Found %d conversations needing follow-up", len(conversations))
+
+	successCount := 0
+
+	for i, conv := range conversations {
+		m.logger.Infof("Processing conversation %d/%d: %s", i+1, len(conversations), conv.ProfileName)
+
+		// Check daily limit
+		countToday, _ := m.db.GetMessageCountToday()
+		if countToday >= m.maxPerDay {
+			m.logger.Warn("Reached daily limit, stopping")
+			break
+		}
+
+		// Personalize follow-up message
+		message := strings.ReplaceAll(followUpMessage, "{name}", conv.ProfileName)
+		firstName := strings.Fields(conv.ProfileName)[0]
+		message = strings.ReplaceAll(message, "{firstName}", firstName)
+
+		// Send follow-up
+		err := m.sendMessageFromProfile(page, conv.ProfileURL, message)
+		if err != nil {
+			m.logger.Errorf("Failed to send follow-up to %s: %v", conv.ProfileName, err)
+			continue
+		}
+
+		// Mark as sent
+		if err := m.db.MarkFollowUpSent(conv.ProfileURL); err != nil {
+			m.logger.Errorf("Failed to mark follow-up sent: %v", err)
+		}
+
+		// Save message record
+		msg := &storage.Message{
+			ProfileURL:  conv.ProfileURL,
+			ProfileName: conv.ProfileName,
+			Content:     message,
+			SentAt:      time.Now(),
+		}
+		m.db.SaveMessage(msg)
+
+		successCount++
+		m.logger.Infof("✅ Sent follow-up to %s", conv.ProfileName)
+
+		// Random wait
+		m.stealthMgr.RandomWaitBetweenActions()
+	}
+
+	m.logger.Infof("Successfully sent %d follow-up messages", successCount)
+	return successCount, nil
+}

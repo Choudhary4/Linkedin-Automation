@@ -35,6 +35,18 @@ type Message struct {
 	SentAt      time.Time
 }
 
+// Conversation represents a conversation thread
+type Conversation struct {
+	ID                  int
+	ProfileURL          string
+	ProfileName         string
+	LastMessageFromThem string
+	LastMessageTime     time.Time
+	LastCheckedAt       time.Time
+	FollowUpSent        bool
+	FollowUpSentAt      *time.Time
+}
+
 // SearchHistory represents a search history record
 type SearchHistory struct {
 	ID          int
@@ -103,9 +115,22 @@ func (db *DB) initSchema() error {
 		searched_at DATETIME NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS conversations (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		profile_url TEXT NOT NULL UNIQUE,
+		profile_name TEXT,
+		last_message_from_them TEXT,
+		last_message_time DATETIME,
+		last_checked_at DATETIME,
+		follow_up_sent BOOLEAN DEFAULT 0,
+		follow_up_sent_at DATETIME
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_connection_requests_sent_at ON connection_requests(sent_at);
 	CREATE INDEX IF NOT EXISTS idx_connection_requests_status ON connection_requests(status);
 	CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at);
+	CREATE INDEX IF NOT EXISTS idx_conversations_profile_url ON conversations(profile_url);
+	CREATE INDEX IF NOT EXISTS idx_conversations_follow_up ON conversations(follow_up_sent);
 	`
 
 	_, err := db.conn.Exec(schema)
@@ -335,4 +360,78 @@ func (db *DB) GetAcceptedConnectionsWithoutMessage() ([]*ConnectionRequest, erro
 	}
 
 	return requests, nil
+}
+
+// SaveOrUpdateConversation saves or updates a conversation record
+func (db *DB) SaveOrUpdateConversation(conv *Conversation) error {
+	query := `
+		INSERT INTO conversations (profile_url, profile_name, last_message_from_them, last_message_time, last_checked_at, follow_up_sent, follow_up_sent_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(profile_url) DO UPDATE SET
+			profile_name = excluded.profile_name,
+			last_message_from_them = excluded.last_message_from_them,
+			last_message_time = excluded.last_message_time,
+			last_checked_at = excluded.last_checked_at,
+			follow_up_sent = excluded.follow_up_sent,
+			follow_up_sent_at = excluded.follow_up_sent_at
+	`
+
+	_, err := db.conn.Exec(query, conv.ProfileURL, conv.ProfileName, conv.LastMessageFromThem,
+		conv.LastMessageTime, conv.LastCheckedAt, conv.FollowUpSent, conv.FollowUpSentAt)
+	if err != nil {
+		return fmt.Errorf("failed to save conversation: %w", err)
+	}
+
+	return nil
+}
+
+// GetConversationsNeedingFollowUp returns conversations with replies but no follow-up sent
+func (db *DB) GetConversationsNeedingFollowUp() ([]*Conversation, error) {
+	query := `
+		SELECT id, profile_url, profile_name, last_message_from_them, last_message_time, 
+		       last_checked_at, follow_up_sent, follow_up_sent_at
+		FROM conversations
+		WHERE last_message_from_them IS NOT NULL 
+		  AND follow_up_sent = 0
+		ORDER BY last_message_time DESC
+	`
+
+	rows, err := db.conn.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get conversations: %w", err)
+	}
+	defer rows.Close()
+
+	var conversations []*Conversation
+	for rows.Next() {
+		var conv Conversation
+		var followUpSentAt sql.NullTime
+		err := rows.Scan(&conv.ID, &conv.ProfileURL, &conv.ProfileName, &conv.LastMessageFromThem,
+			&conv.LastMessageTime, &conv.LastCheckedAt, &conv.FollowUpSent, &followUpSentAt)
+		if err != nil {
+			return nil, err
+		}
+		if followUpSentAt.Valid {
+			conv.FollowUpSentAt = &followUpSentAt.Time
+		}
+		conversations = append(conversations, &conv)
+	}
+
+	return conversations, nil
+}
+
+// MarkFollowUpSent marks a conversation as having sent a follow-up
+func (db *DB) MarkFollowUpSent(profileURL string) error {
+	query := `
+		UPDATE conversations 
+		SET follow_up_sent = 1, follow_up_sent_at = ?
+		WHERE profile_url = ?
+	`
+
+	_, err := db.conn.Exec(query, time.Now(), profileURL)
+	if err != nil {
+		return fmt.Errorf("failed to mark follow-up sent: %w", err)
+	}
+
+	return nil
 }
